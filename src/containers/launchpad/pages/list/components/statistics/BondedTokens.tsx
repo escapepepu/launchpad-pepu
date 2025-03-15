@@ -5,40 +5,22 @@ import { commaizeNumber } from "@boxfoxs/utils";
 import { formatDecimals } from "utils/format";
 import { ethers } from "ethers";
 import { LoadingLottie } from "components/lotties/LoadingLottie";
+import { inDesktop } from "@boxfoxs/bds-web";
 import { getV3BondedPrice } from "utils/getV3BondedPrice";
 import { fetchQuote } from "hooks/on-chain/useDexPrice";
 
-/**
- * List of tokens we do NOT want to display.
- */
+// Same blacklist
 const BLACKLIST_TOKENS = ["0x33c2643b968cf7ada40e26ad0d884b6e9aaf76c3"];
 
-/**
- * BondedTokens component
- * - Fetches base WPEPU price (dexPrice)
- * - Queries subgraph for ended presales
- * - Calculates market cap & performance in “x times”
- * - Displays table with pagination
- */
 export default function BondedTokens() {
-  // Store the WPEPU dex price
   const [dexPrice, setDexPrice] = useState(0);
-
-  // Pagination states
   const [paginationPageNumber, setPaginationPageNumber] = useState(0);
   const [loadingNewPage, setLoadingNewPage] = useState(true);
-
-  // Final tokens to show in the table
   const [bondedTokens, setBondedTokens] = useState([]);
-
-  // Whether there is another page after the current one
   const [hasMore, setHasMore] = useState(false);
 
-  // =========================
-  // 1) Fetch the base Dex price
-  // =========================
   useEffect(() => {
-    // Check PEPU price and set initial market cap
+    // Fetch the base WPEPU price once
     const fetchDexPriceOnce = async () => {
       try {
         const price = await fetchQuote();
@@ -50,25 +32,15 @@ export default function BondedTokens() {
     fetchDexPriceOnce();
   }, []);
 
-  // =========================
-  // 2) Fetch presales data whenever dexPrice or pagination changes
-  // =========================
   useEffect(() => {
     if (!dexPrice) return;
     fetchBondedPresales();
   }, [dexPrice, paginationPageNumber]);
 
-  /**
-   * fetchBondedPresales
-   * - Queries the subgraph for presales that have ended (isEnd: true)
-   * - Filters out blacklisted tokens
-   * - Fetches each token’s price from DEX (via getV3BondedPrice)
-   * - Calculates market cap and “x times” performance
-   * - Sorts by market cap desc, sets final data
-   */
   const fetchBondedPresales = async () => {
     setLoadingNewPage(true);
     try {
+      // Graph query
       const query = `
         query BondedPresales {
           presales(
@@ -84,7 +56,6 @@ export default function BondedTokens() {
           }
         }
       `;
-
       const res = await fetch(process.env.NEXT_PUBLIC_GRAPH_ENDPOINT, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -92,55 +63,50 @@ export default function BondedTokens() {
       });
       const json = await res.json();
 
-      // Raw list of tokens from subgraph
       let tokens = json.data?.presales || [];
 
-      // filter out blacklisted tokens
+      // Filter out blacklisted tokens
       tokens = tokens.filter((t) => !BLACKLIST_TOKENS.includes(t.token));
 
       // If we got 50 items, we can go to next page; otherwise we’re at the end
       setHasMore(tokens.length === 50);
 
-      // Every presale's "data" may be a JSON string, so parse it
+      // Parse each token's "data" field if needed
       tokens.forEach((t) => {
         if (typeof t.data === "string") {
           t.data = JSON.parse(t.data);
         }
       });
 
-      // Wait for token price to be fetched from DEX
+      // Fetch price from getV3BondedPrice for each token
       const pricePromises = tokens.map((token) => getV3BondedPrice(token.token));
       const results = await Promise.all(pricePromises);
 
-      // Merge the price results into each token object
+      // Merge prices into tokens
       tokens = tokens.map((token, i) => {
-        // Convert raw DEX price to float
         const rawPrice = results[i];
         const tokenPrice = parseFloat(ethers.utils.formatEther(rawPrice)) || 0;
-
-        // Convert totalSupply from BigNumber => float
         const supply = parseFloat(ethers.utils.formatEther(token.totalSupply));
-
-        // Calculate market cap
         const marketCap = supply * tokenPrice * dexPrice;
 
-        // Hard-coded initial market cap from old code
+        // If you want the same "x times" approach:
+        // (the old code used a fixed initial MC = 1200)
         const initialMarketCap = 1200;
-
-        // xChange in “percentage form,” e.g. 7300 => 73.00x
         const xChange = ((marketCap - initialMarketCap) / initialMarketCap) * 100;
+        // That means if marketCap is 89,000 =>
+        // xChange ~ 7300 => "73.0x" when dividing by 100 in the table
 
         return {
           ...token,
+          tokenPrice,
           marketCap,
           xChange,
         };
       });
 
-      // Sort tokens by marketCap descending
+      // Sort by marketCap descending
       tokens.sort((a, b) => b.marketCap - a.marketCap);
 
-      // Update the state with final list
       setBondedTokens(tokens);
     } catch (error) {
       console.error("Error fetching bonded tokens", error);
@@ -148,9 +114,6 @@ export default function BondedTokens() {
     setLoadingNewPage(false);
   };
 
-  // =========================
-  // RENDER
-  // =========================
   return (
       <div>
         {loadingNewPage ? (
@@ -175,7 +138,7 @@ export default function BondedTokens() {
               ) : (
                   bondedTokens.map((item) => (
                       <TableBodyRow key={item.token}>
-                        {/* Token name column (30%) */}
+                        {/* Name column (30%) */}
                         <TableBody
                             width={30}
                             style={{ display: "flex", alignItems: "center", width: "100%" }}
@@ -187,24 +150,20 @@ export default function BondedTokens() {
                         {/* Marketcap column (30%) */}
                         <TableBody width={30}>
                           {item.marketCap ? (
-                              `$${commaizeNumber(
-                                  formatDecimals(Math.abs(item.marketCap), 2)
-                              )}`
+                              `$${commaizeNumber(formatDecimals(Math.abs(item.marketCap), 2))}`
                           ) : (
                               <LoadingLottie width={18} />
                           )}
                         </TableBody>
 
                         {/* Performance column (30%)
-                      Here, xChange=7300 => displayed as "73.00x"
+                      We do (xChange / 100) + "x"
+                      e.g. xChange=7300 => "73.00x"
                   */}
                         <TableBody width={30}>
                           {item.xChange !== undefined ? (
                               <>
-                                {commaizeNumber(
-                                    formatDecimals(item.xChange / 100, 2)
-                                )}
-                                x
+                                {commaizeNumber(formatDecimals(item.xChange / 100, 2))}x
                               </>
                           ) : (
                               <LoadingLottie width={18} />
@@ -229,10 +188,8 @@ export default function BondedTokens() {
         )}
 
         <Spacing height={8} />
-
-        {/* Pagination */}
         <PaginationContainer>
-          {/* Left arrow (go back) */}
+          {/* Left arrow */}
           <ScrollButtonPagination
               onClick={() => {
                 if (paginationPageNumber > 0) {
@@ -251,12 +208,11 @@ export default function BondedTokens() {
             </svg>
           </ScrollButtonPagination>
 
-          {/* Current page number */}
           <span style={{ fontSize: "18px", color: "#fff", margin: "0 50px" }}>
           {paginationPageNumber + 1}
         </span>
 
-          {/* Right arrow (go forward) */}
+          {/* Right arrow */}
           {hasMore && (
               <ScrollButtonPagination
                   onClick={() => setPaginationPageNumber((prev) => prev + 1)}
@@ -277,21 +233,20 @@ export default function BondedTokens() {
   );
 }
 
-/* =======================
-   Styled Components
-   ======================= */
+/* ======== Styled Components ======== */
+
 const TableHeader = styled.th`
-    color: #fff;
-    font-size: 14px;
-    font-weight: 500;
-    line-height: 32px;
-    text-align: left;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 32px;
+  text-align: left;
 `;
 
 const TableBodyRow = styled.tr`
-    :last-child td {
-        border-bottom: none;
-    }
+  :last-child td {
+    border-bottom: none;
+  }
 `;
 
 /**
