@@ -1,72 +1,99 @@
 import { inDesktop, Spacing } from "@boxfoxs/bds-web";
-import { isMobile } from "@boxfoxs/next";
 import { commaizeNumber } from "@boxfoxs/utils";
 import styled from "@emotion/styled";
 import { ChevronLeftIcon, ChevronRightIcon } from "@heroicons/react/24/outline";
 import { LoadingLottie } from "components/lotties/LoadingLottie";
 import { fetchQuote } from "hooks/on-chain/useDexPrice";
 import { useEffect, useState } from "react";
-import { formatDecimals} from "utils/format";
+import { formatDecimals } from "utils/format";
 import { pressableStyle } from "utils/style";
 
+/**
+ * Stats24H Component
+ * - Fetches top pools by totalValueLockedETH
+ * - Looks up presale data to find iconUrl, etc.
+ * - Calculates market cap, volume, and performance in “x times”
+ * - Displays results with pagination
+ */
 const Stats24H = () => {
+  // Dex price for WPEPU
   let [dexPrice, setDexPrice] = useState(0);
+
+  // Pagination states
   let [paginationPageNumber, setPaginationPageNumber] = useState(0);
   let [loadingNewPage, setLoadingNewPage] = useState(true);
 
-  // Quoter params
+  // Final list of tokens/pools
   const [highestPriceTokensOut, setHighestPriceTokensOut] = useState([]);
 
-  // Check PEPU price and set initial market cap
+  // =========================
+  // 1) Fetch Dex Price
+  // =========================
   useEffect(() => {
     const fetchDexPrice = async () => {
-      const price = await fetchQuote();
-      setDexPrice(parseFloat(price));
+      try {
+        const price = await fetchQuote();
+        setDexPrice(parseFloat(price));
+      } catch (err) {
+        console.error("Error fetching Dex Price", err);
+      }
     };
     fetchDexPrice();
   }, []);
 
-  // Fetch highest price pool
+  // =========================
+  // 2) Fetch top pools after Dex price is known
+  // =========================
   useEffect(() => {
     if (dexPrice === 0) return;
     fetchPoolWithHighestPrice();
   }, [dexPrice]);
 
-  // Fetch highest price pool on pagination change
+  // Also refetch whenever pagination changes
   useEffect(() => {
     fetchPoolWithHighestPrice();
   }, [paginationPageNumber]);
 
-  // fetch pool with highest token price in WPEPU
+  /**
+   * fetchPoolWithHighestPrice
+   * - Queries subgraph for top 50 pools by totalValueLockedETH
+   * - For each pool, fetches presale data (iconUrl, etc.)
+   * - Calculates marketCap, volume, xChange
+   * - Updates state with final results
+   */
   const fetchPoolWithHighestPrice = async () => {
     setLoadingNewPage(true);
 
+    // Build a GraphQL query that uses skip for pagination
     const query = `
-        query GetHighestPriceToken {
-          pools(
-            orderBy: totalValueLockedETH,
-            orderDirection: desc, first: 50, skip: ${paginationPageNumber * 49}
-          ) {
+      query GetHighestPriceToken {
+        pools(
+          orderBy: totalValueLockedETH,
+          orderDirection: desc,
+          first: 50,
+          skip: ${paginationPageNumber * 49}
+        ) {
+          id
+          totalValueLockedETH
+          totalValueLockedToken0
+          totalValueLockedToken1
+          token1 {
+            name
+            symbol
             id
-            totalValueLockedETH
-            totalValueLockedToken0
-            totalValueLockedToken1
-            token1 {
-              name
-              symbol
-              id
-            }
-            token0 {
-              name
-              symbol
-              id
-            }
-            volumeToken0
-            volumeToken1
           }
+          token0 {
+            name
+            symbol
+            id
+          }
+          volumeToken0
+          volumeToken1
         }
+      }
     `;
 
+    // Fetch from subgraph
     const highestPriceTokenJson = await fetch(process.env.NEXT_PUBLIC_GRAPH_ENDPOINT, {
       method: "POST",
       headers: {
@@ -75,51 +102,59 @@ const Stats24H = () => {
       body: JSON.stringify({ query }),
     }).then((res) => res.json());
 
-    // Fetch presale data for highestTVLTokens
+    // 3) Fetch presale data for these pools
     const tokenDatas = await fetchPresales(highestPriceTokenJson.data.pools);
     // console.log("tokenDatas >>>>>>>>", tokenDatas);
 
-    // Match same token with presale data and put 'data' from presale to token and
-    // Check if token0 or token1 is WPEPU and after that set "volume" attribute from volumeToken0 or volumeToken1 that corresponds to WPEPU
-    // and calculate token performance naming it "xChange" using initialMarketCap and marketCap
+    // 4) Match presale data, set iconUrl/description, and compute stats
     for (let token of highestPriceTokenJson.data.pools) {
+      // Attempt to find a matching presale by "id"
       const tokenData = tokenDatas.find((t) => t.id === token.id);
       if (tokenData) {
-        token['iconUrl'] = tokenData.data.iconUrl;
-        token['description'] = tokenData.data.description;
+        token["iconUrl"] = tokenData.data.iconUrl;
+        token["description"] = tokenData.data.description;
 
-        // Set initial market cap that is totalValueLocked * dexPrice
-        token['initialMarketCap'] = 50 * dexPrice;
-        token['marketCap'] = parseFloat(token.totalValueLockedETH) * dexPrice;
+        // Set initial market cap that is (50 * dexPrice)
+        // so we can compute "x times" from that baseline
+        token["initialMarketCap"] = 50 * dexPrice;
+
+        // Current market cap is totalValueLockedETH * dexPrice
+        token["marketCap"] = parseFloat(token.totalValueLockedETH) * dexPrice;
       }
     }
 
-    // Check if token0 or token1 is WPEPU and after that set "volume" attribute from volumeToken0 or volumeToken1 that corresponds to WPEPU
-    // and calculate token performance naming it "xChange" using initialMarketCap and marketCap
+    // 5) Compute volume and xChange for each pool
     for (let token of highestPriceTokenJson.data.pools) {
+      // Check if token0 or token1 is WPEPU and set volume accordingly
       if (token.token0.symbol === "WPEPU") {
-        token['volume'] = parseFloat(token.volumeToken0) * dexPrice;
-        if (token.totalValueLocked === 0) {
-          token['xChange'] = 0;
-        } else {
-          token['xChange'] = ((token.marketCap - token.initialMarketCap) / token.initialMarketCap) * 100;
-        }
+        token["volume"] = parseFloat(token.volumeToken0) * dexPrice;
       } else {
-        token['volume'] = parseFloat(token.volumeToken1) * dexPrice;
-        if (token.totalValueLocked === 0) {
-          token['xChange'] = 0;
-        } else {
-          token['xChange'] = ((token.marketCap - token.initialMarketCap) / token.initialMarketCap) * 100;
-        }
+        token["volume"] = parseFloat(token.volumeToken1) * dexPrice;
+      }
+
+      // Calculate performance => ( (marketCap - initMC) / initMC ) * 100 => xChange
+      // Then displayed as xChange/100 => “x” in the table
+      if (!token.marketCap) {
+        token["xChange"] = 0;
+      } else {
+        token["xChange"] = ((token.marketCap - token.initialMarketCap) / token.initialMarketCap) * 100;
       }
     }
 
-    // console.log("highestTVLTokens 24H list >>>>>>>>", highestPriceTokenJson.data.pools);
+    // Save final list
     setHighestPriceTokensOut(highestPriceTokenJson.data.pools);
+    setLoadingNewPage(false);
   };
 
-  // When we have highestPriceTokensOut, fetch presale data for them
+  /**
+   * fetchPresales
+   * - Given an array of pool objects, extract the token ID that’s NOT WPEPU
+   * - Query subgraph for presales that match those token IDs
+   * - Parse each presale’s "data" field as JSON
+   * - Return array of presale objects
+   */
   const fetchPresales = async (tokenObjects: any) => {
+    // For each pool, decide if token0 or token1 is the "main" token
     const tokenIds = tokenObjects.map((token) => {
       if (token.token0.symbol === "WPEPU") {
         return token.token1.id;
@@ -130,7 +165,7 @@ const Stats24H = () => {
 
     const query = `
       query GetTokensData {
-        presales(where: { token_in: [${tokenIds.map(id => `"${id}"`).join(",")}] }) {
+        presales(where: { token_in: [${tokenIds.map((id) => `"${id}"`).join(",")}] }) {
           id
           data
           name
@@ -148,169 +183,206 @@ const Stats24H = () => {
       body: JSON.stringify({ query }),
     }).then((res) => res.json());
 
-    // Every token tokenDataJson.data.presales have data atribute that needs to be JSON.parse
-    tokensDataJson.data.presales.forEach((presale) => {
+    // Every presale has a "data" field that may be JSON string => parse it
+    tokensDataJson.data.presales.forEach((presale: any) => {
       presale.data = JSON.parse(presale.data);
     });
-
-    // Loading is completed
-    setLoadingNewPage(false);
 
     return tokensDataJson.data.presales;
   };
 
+  // =========================
+  // RENDER
+  // =========================
   return (
-    <div>
-      {
-        !loadingNewPage && (
-          <table style={{ width: "100%", minWidth: "748px", borderSpacing: 0 }}>
-            <thead>
-              <tr>
-                <TableHeader> Token name </TableHeader>
-                <TableHeader> Marketcap </TableHeader>
-                <TableHeader> 24h Volume </TableHeader>
-                <TableHeader> Performance </TableHeader>
-                <TableHeader> Info </TableHeader>
-              </tr>
-            </thead>
-            <tbody>
-              {!highestPriceTokensOut?.length ? (
-                <TableBodyRow style={{ height: "56px"}} />
-              ) : 
-              (
-                highestPriceTokensOut?.map((item) => {
-                  return (
-                    <TableBodyRow key={item.id}>
-                        <TableBody width={23} style={{ display: "flex", alignItems: "center", width: "100%" }}>
-                          <StyledImage src={item?.iconUrl} />
-                          <p style={{ paddingLeft: "10px" }}>{
-                            item.token0.symbol != "WPEPU" ? item.token0.name : item.token1.name
-                          }</p>
-                        </TableBody>
-                        <TableBody width={23}>
-                          {item.marketCap && (
-                            <>
-                              ${commaizeNumber(
-                                formatDecimals(
-                                  Math.abs(item.marketCap),
-                                  2
-                                )
-                              )}
-                            </>
-                          )}
-                          {(!item.hasOwnProperty("marketCap")) && (
-                            <LoadingLottie width={18} />
-                          )}
-                        </TableBody>
-    
-                        <TableBody width={23}>
-                          {item.volume && (
-                            <>
-                              ${commaizeNumber(
-                                formatDecimals(
-                                  Math.abs(item.volume),
-                                  2
-                                )
-                              )}
-                            </>
-                          )}
-                          {(!item.hasOwnProperty("volume")) && (
-                            <LoadingLottie width={18} />
-                          )}
-                        </TableBody>
-    
-                        <TableBody width={23}>
-                          {item.xChange && (
-                            <>
-                              {commaizeNumber(
-                                formatDecimals(
-                                  (item.xChange/100),
-                                  2
-                                )
-                              )}x
-                            </>
-                          )}
-                          {(!item.hasOwnProperty("xChange")) && (
-                            <LoadingLottie width={18} />
-                          )}
-                        </TableBody>
-    
-                        <TableBody width={8}>
-                          <a
-                            href={`/${
-                              item.token0.symbol != "WPEPU" ? item.token0.id : item.token1.id
-                            }`}
-                            rel="noreferrer"
-                          >
-                            <img
-                              src="/images/ic_expand_window.svg"
-                              alt="expand"
-                              width={14}
-                            />
-                          </a>
-                        </TableBody>
-                    </TableBodyRow>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-        )
-      }
+      <div>
+        {
+          /**
+           * If we’re still loading data, show a spinner
+           */
+            loadingNewPage && (
+                <>
+                  <Spacing height={28} />
+                  <LoadingLottie width={36} />
+                  <Spacing height={28} />
+                </>
+            )
+        }
 
-      {
-        loadingNewPage && (
-          <>
-            <Spacing height={28} />
-            <LoadingLottie width={36} />
-            <Spacing height={28} />
-          </>
-        )
-      }
+        {
+          /**
+           * Once loading is done, show the table
+           */
+            !loadingNewPage && (
+                <table style={{ width: "100%", minWidth: "748px", borderSpacing: 0 }}>
+                  <thead>
+                  <tr>
+                    <TableHeader> Token name </TableHeader>
+                    <TableHeader> Marketcap </TableHeader>
+                    <TableHeader> 24h Volume </TableHeader>
+                    <TableHeader> Performance </TableHeader>
+                    <TableHeader> Info </TableHeader>
+                  </tr>
+                  </thead>
+                  <tbody>
+                  {
+                    /**
+                     * If no tokens found, just show empty row
+                     */
+                    !highestPriceTokensOut?.length ? (
+                        <TableBodyRow style={{ height: "56px" }} />
+                    ) : (
+                        highestPriceTokensOut?.map((item) => {
+                          return (
+                              <TableBodyRow key={item.id}>
+                                {/* Name column (23%) */}
+                                <TableBody
+                                    width={23}
+                                    style={{ display: "flex", alignItems: "center", width: "100%" }}
+                                >
+                                  <StyledImage src={item?.iconUrl} />
+                                  <p style={{ paddingLeft: "10px" }}>
+                                    {item.token0.symbol !== "WPEPU" ? item.token0.name : item.token1.name}
+                                  </p>
+                                </TableBody>
 
-      <Spacing height={8} />
-      <div style={{ display: "flex", justifyContent: "center", alignItems: "center" }}>
-        <ScrollButtonPagination onClick={() => {
-          let paginationNmbr = paginationPageNumber;
-          if (paginationNmbr > 0) {
-            paginationNmbr = paginationNmbr - 1;
-            setPaginationPageNumber(paginationNmbr)
-          }
-        }}>
-          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ transform: "rotateY(180deg)" }}>
-            <path
-              d="M9 6l6 6-6 6"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </ScrollButtonPagination>
-        <span style={{ fontSize: "18px", color: "#fff", margin: "0 50px" }}> {  1 + paginationPageNumber } </span>
+                                {/* Marketcap column (23%) */}
+                                <TableBody width={23}>
+                                  {item.marketCap ? (
+                                      <>
+                                        $
+                                        {commaizeNumber(
+                                            formatDecimals(Math.abs(item.marketCap), 2)
+                                        )}
+                                      </>
+                                  ) : (
+                                      <LoadingLottie width={18} />
+                                  )}
+                                </TableBody>
 
-        {highestPriceTokensOut.length > 49 ?
-          <ScrollButtonPagination onClick={() => {
-              let paginationNmbr = paginationPageNumber + 1;
-              setPaginationPageNumber(paginationNmbr);
-            }}>
-            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                {/* 24h Volume column (23%) */}
+                                <TableBody width={23}>
+                                  {item.volume ? (
+                                      <>
+                                        $
+                                        {commaizeNumber(
+                                            formatDecimals(Math.abs(item.volume), 2)
+                                        )}
+                                      </>
+                                  ) : (
+                                      <LoadingLottie width={18} />
+                                  )}
+                                </TableBody>
+
+                                {/* Performance column (23%) => xChange/100 => “x” */}
+                                <TableBody width={23}>
+                                  {item.xChange !== undefined ? (
+                                      <>
+                                        {commaizeNumber(
+                                            formatDecimals(item.xChange / 100, 2)
+                                        )}
+                                        x
+                                      </>
+                                  ) : (
+                                      <LoadingLottie width={18} />
+                                  )}
+                                </TableBody>
+
+                                {/* Info column (8%) => link to that token's page */}
+                                <TableBody width={8}>
+                                  <a
+                                      href={`/${
+                                          item.token0.symbol !== "WPEPU"
+                                              ? item.token0.id
+                                              : item.token1.id
+                                      }`}
+                                      rel="noreferrer"
+                                  >
+                                    <img
+                                        src="/images/ic_expand_window.svg"
+                                        alt="expand"
+                                        width={14}
+                                    />
+                                  </a>
+                                </TableBody>
+                              </TableBodyRow>
+                          );
+                        })
+                    )
+                  }
+                  </tbody>
+                </table>
+            )
+        }
+
+        {/* Pagination controls */}
+        <Spacing height={8} />
+        <div style={{ display: "flex", justifyContent: "center", alignItems: "center" }}>
+          {/* Left arrow */}
+          <ScrollButtonPagination
+              onClick={() => {
+                let paginationNmbr = paginationPageNumber;
+                if (paginationNmbr > 0) {
+                  paginationNmbr = paginationNmbr - 1;
+                  setPaginationPageNumber(paginationNmbr);
+                }
+              }}
+          >
+            <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                xmlns="http://www.w3.org/2000/svg"
+                style={{ transform: "rotateY(180deg)" }}
+            >
               <path
-                d="M9 6l6 6-6 6"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
+                  d="M9 6l6 6-6 6"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
               />
             </svg>
           </ScrollButtonPagination>
-        : <></>}
+
+          <span style={{ fontSize: "18px", color: "#fff", margin: "0 50px" }}>
+          {1 + paginationPageNumber}
+        </span>
+
+          {/* Right arrow */}
+          {highestPriceTokensOut.length > 49 ? (
+              <ScrollButtonPagination
+                  onClick={() => {
+                    let paginationNmbr = paginationPageNumber + 1;
+                    setPaginationPageNumber(paginationNmbr);
+                  }}
+              >
+                <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    xmlns="http://www.w3.org/2000/svg"
+                >
+                  <path
+                      d="M9 6l6 6-6 6"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                  />
+                </svg>
+              </ScrollButtonPagination>
+          ) : (
+              <></>
+          )}
+        </div>
       </div>
-    </div>
   );
-}
+};
 
 export default Stats24H;
+
+/* ============================
+   Styled Components
+   ============================ */
 
 const TableHeader = styled.th`
   color: #fff;
@@ -342,6 +414,7 @@ const LeftButton = styled(ChevronLeftIcon)`
   cursor: pointer;
   ${pressableStyle.opacity()}
 `;
+
 const RightButton = styled(ChevronRightIcon)`
   cursor: pointer;
   ${pressableStyle.opacity()}
